@@ -1,0 +1,194 @@
+#!/bin/bash
+# fieldz --- Shell script to print specific fields from input columns
+
+main() {
+	if [[ -t 0 || `regexp ^-?-help$ $1` ]] ;then echo -e "$msg">/dev/tty;exit 1;fi
+	#log "fieldz main111 debug col:$col. fsep:$fsep.  arg1:$1.  arg2:$2." 
+	local fsep=' ' rsep;
+	space=" ";
+	checkparams() {
+		if test "$1" = -d;then 
+			fsep="$2";
+			return 2;
+		else
+			if regexp "-d.*" "$1"; then 
+				fsep=${1#-d};return 1;fi
+		fi
+		if test "$1" = -r;then 
+			rsep=$2;return 2;
+		else
+			if regexp "-r.*" "$1"; then 
+				rsep=${1#-r};return 1;fi
+		fi
+		if test "$1" = -z; then
+			space="$SPACER";
+			return 1;fi
+	}
+	checkparams "$@";shift $?
+	checkparams "$@";shift $?
+	fs=$fsep
+	while isNaN $1;do if test ${1:0:1} = "-" || regexp "[0-9]+-" "$1"; then break;fi; 
+					  prefix=$prefix"$1$space"; shift; 
+	done
+	#log have prefix:$prefix, fsep:$fsep, rsep:$rsep, star:$*, space=$space.
+	if test "$rsep";then awk 'BEGIN{RS="'$rsep'"} {gsub("\n"," ");print}';else cat;fi |
+		while read line; do
+			#log "main() read line from stdin as: $line "
+			wchar0=`wchar`;
+			if test "$prefix";then echo -en "$prefix";fi
+			if test -z $1;then field;fi;                #default, ie, last field
+			i=0;
+			for col in "$@";do      #process each user specification of a field then call field() to print the required one.
+				fs=$fsep
+				if isNaN $col;then
+					#log "for loop,  NaN, col=$col"
+					if regexp "-[^0-9]+" "$col"; then          #find if a dash<name> in spec.
+						fs=${col:1}; col=2;flag=\"\|\';            #it is a named field
+					else if regexp "[0-9]+-" "$col"; then         #look for <num><dash>, eg, 2-, print all prior fields
+							 col=${col:0:-1};
+							 if test $col -lt 0;then if test $col -eq -1;then col=''; else col=$col+1;fi; col=NF$col;fi #as below, copy to func
+							 andon=true;upto=true;
+							  else echo -en "$col$space"; continue;          #is just text in spec copy to output
+							 #	 else echo -en "$col"; continue;          #is just text in spec copy to output
+						 fi
+					fi
+				else #is numeric col(s)
+					if [[ $col = *+ ]];then
+						andon=true;col=${col/+};
+					fi
+					if test $col -lt 0;then
+						if test $col -eq -1;then 
+							col='';
+						else col=$col+1;fi;
+						col=NF$col;fi
+				fi #endif isNaN
+				field $flag; 
+				flag=''
+				let i=i+1
+				#log test $# noteq $i
+				if test $# -ne $i && test -z $andon;then echo -en "$space";fi 2>/dev/null;
+				unset andon upto
+			done #end of: for col in $@
+			#log "main(), end for col loop, wchar0:$wchar0 "`wchar`
+			echo 2>/dev/null # newline, also in case of broken pipe.
+		done #end of: while read line
+}
+
+field() {
+	#log Call field2 with "$@."
+	local res=$(field2 $@)
+	if test "$res"; then echo -en "$res"; fi
+}
+
+field2() { #print the particular field , uses globals: andon, col, line
+	#log "field():$fs.  col:$col.  arg1:$1. line:$line. andon:$andon." 
+	if test -z $col;then col=NF;fi
+	echo   "$line"|
+		if test -z $andon; then
+			#log "andon is -z $andon"
+			if test -z "$fs";then
+				awk '{printf "%s", $('$col')}'
+			else
+				if test -z $1; then
+					awk -F"$fs" '{ printf "%s", $('$col') }'
+				else                                     #flag for named field $1
+					after=`awk -F"$fs" '{ printf "%s", $2 }'`  # >1 field match in? print $3, $4? 
+					if `regexp "^\ *[\"\']" "$after"`;then
+						echo -n "$after" | awk -F"$1" '{ printf "%s", $2 }'
+					else
+						after=${after## }
+						echo -n ${after%% *}
+					fi
+				fi
+			fi
+		else  # if $andon is not empty, !-z$andon,
+			#log "field(): Do cut with fs:$fs,col:$col,upto:$upto." 
+			tr '\t' ' '|
+				if test -z $upto; then
+					awk -v space="$space" -F"$fs" '  { for(i=('$col');i<=NF;i++) {printf "%s%s", $i, space; }; }';
+				else
+					awk -v space="$space" -F"$fs" '{ 
+					for(i=1;i<=('$col');i++) {printf "%s%s", $i, space; }; }';
+				fi     |
+				tr -d "\n"
+		fi
+	#log "field() end."
+} 
+
+regexp() { #see if $1 as grep regex is in $2
+	rexp=$1;shift
+	echo "$@"|egrep -q -e "$rexp"
+}
+
+isNaN() {
+	if test -z "$*";then return 1;fi
+	if regexp "^-?[0-9]+\+?$" "$*";then return 1;else return 0;fi  # eg, -123+ is a number but not 12.3 nor a123, nor 123a
+}
+
+isNum() {
+	if test -z "$*";then return 1;fi
+	if isNaN "$*"; then return 1; else return 0; fi
+}
+
+wchar() {
+	sync
+	grep wchar /proc/$$/io|grep -o '[0-9]*';
+}
+
+msg="\nUsage: fieldz [-d field-delimiter] [-r record-separator] [ -z ] [[-]column-number[+]|-fieldname|text]...[filename]
+	\n
+	\nPrint given field column(s) from input.  Default is last field.  \
+	\nUse a minus number to print counting from the last field.  \
+	\nFirst field is numbered from 1 not from zero.  Zero refers to all fields.\
+	\nUse -<fieldname> to print the value of a named field. 
+	\nOrdinary text is just copied to output.
+	\nUse a plus sign, '+', after a field number to print all following fields.
+	\nUse a minus sign, '-', after a field number to print all prior fields.
+	\n-d <delimiter> will use given delimiter instead of spaces to split input fields
+	\n-r <separator> will use given separator instead of newlines to split input records (newlines are swapped for spaces)
+	\n-z output is not padded with space, eg, fieldz 1 2 3 will output three fields joined together without spaces.
+	\n\tWith the -z option one can set an environment variable called SPACER to join together with whatever character is in \$SPACER.
+	\n\nExamples:\t\$ echo yes we can | fieldz 2 3 3 1 
+	\n\t==> we can can yes
+	\n
+	\n\t\$ echo b=\"item1\" bcost=\"99\"   | fieldz 'It costs: ' -bcost=
+	\n\t==> It costs: 99 
+	\n
+	\n\t\$ fieldz -d: userid: 1  shell: -1 /etc/passwd \
+	\n\t==> userid: guest shell:  /bin/sh 
+	\n
+	\n\t\$ echo /var/www/html | SPACER=/ fieldz -z -d/ -3- log
+	\n\t==> /var/log
+	\n
+	\n\t$ find . -printf %T+' '  -print |sort|fieldz 2+ | tr '\\\n' ' ';echo
+	\n\t--gives a single line output with the names of all files sorted by modified time, oldest first.
+	\n
+	\n\t$ cat bookmarks.xml | fieldz -r \<bookmark -d url=\" 2 | fieldz -d\" 1
+	\n\t--extracts the url attribute value from an xml file
+	\n
+	\n\t$ echo -e \"abc def ghi das\"|fieldz -2-
+	\n\t==> abc def ghi 
+	\n\t--prints all but the last field.
+	\n"
+
+# debugfile=/tmp/fieldz.log
+# exec > >(tee -a $debugfile)
+# exec 2>&1
+# rm -f $debugfile
+
+log() { echo "{./fieldz debug, $@}"; > /dev/tty; } # > $debugfile; }
+trim() { sed "s/^[[:blank:]]*//;s/[$SPACER[:blank:]]*\$//"; } #blank is space or tab, [ \x09]
+
+# Get filename at end of args, tc mod, rm'ed cos fieldz after tail -f hangs at </dev/stdin
+# for lastarg; do :;done;    #trick to get last arg, goes through $1, $2, to last one.
+# echo Got lastarg $lastarg
+# if test -f "$lastarg" && isNaN "$lastarg"; then  #last arg is a file!
+# 	set -- "${@:1:$#-1}"   #as if, shift -1; rm's lastarg reset $1 $2 ... w/o last one.
+# else
+# 	unset lastarg
+# fi
+# echo main "$@"
+# main "$@" < "${lastarg:-/dev/stdin}" | sed '/^$/d'| trim
+main "$@"  
+
+#also rm empty lines & trim leading & trailing space
